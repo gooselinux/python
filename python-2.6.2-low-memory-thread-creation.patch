@@ -1,0 +1,108 @@
+diff -up Python-2.6.2/Include/pystate.h.low-memory-thread-creation Python-2.6.2/Include/pystate.h
+--- Python-2.6.2/Include/pystate.h.low-memory-thread-creation	2007-03-12 12:11:39.000000000 -0400
++++ Python-2.6.2/Include/pystate.h	2010-06-08 15:23:17.269536993 -0400
+@@ -105,6 +105,8 @@ PyAPI_FUNC(void) PyInterpreterState_Clea
+ PyAPI_FUNC(void) PyInterpreterState_Delete(PyInterpreterState *);
+ 
+ PyAPI_FUNC(PyThreadState *) PyThreadState_New(PyInterpreterState *);
++PyAPI_FUNC(PyThreadState *) _PyThreadState_Prealloc(PyInterpreterState *);
++PyAPI_FUNC(void) _PyThreadState_Init(PyThreadState *);
+ PyAPI_FUNC(void) PyThreadState_Clear(PyThreadState *);
+ PyAPI_FUNC(void) PyThreadState_Delete(PyThreadState *);
+ #ifdef WITH_THREAD
+diff -up Python-2.6.2/Misc/NEWS.low-memory-thread-creation Python-2.6.2/Misc/NEWS
+diff -up Python-2.6.2/Modules/threadmodule.c.low-memory-thread-creation Python-2.6.2/Modules/threadmodule.c
+--- Python-2.6.2/Modules/threadmodule.c.low-memory-thread-creation	2008-06-30 18:42:40.000000000 -0400
++++ Python-2.6.2/Modules/threadmodule.c	2010-06-08 15:23:17.270523343 -0400
+@@ -410,6 +410,7 @@ struct bootstate {
+ 	PyObject *func;
+ 	PyObject *args;
+ 	PyObject *keyw;
++	PyThreadState *tstate;
+ };
+ 
+ static void
+@@ -419,8 +420,9 @@ t_bootstrap(void *boot_raw)
+ 	PyThreadState *tstate;
+ 	PyObject *res;
+ 
+-	tstate = PyThreadState_New(boot->interp);
+-
++	tstate = boot->tstate;
++	tstate->thread_id = PyThread_get_thread_ident();
++	_PyThreadState_Init(tstate);
+ 	PyEval_AcquireThread(tstate);
+ 	res = PyEval_CallObjectWithKeywords(
+ 		boot->func, boot->args, boot->keyw);
+@@ -483,6 +485,11 @@ thread_PyThread_start_new_thread(PyObjec
+ 	boot->func = func;
+ 	boot->args = args;
+ 	boot->keyw = keyw;
++	boot->tstate = _PyThreadState_Prealloc(boot->interp);
++	if (boot->tstate == NULL) {
++		PyMem_DEL(boot);
++		return PyErr_NoMemory();
++	}
+ 	Py_INCREF(func);
+ 	Py_INCREF(args);
+ 	Py_XINCREF(keyw);
+@@ -493,6 +500,7 @@ thread_PyThread_start_new_thread(PyObjec
+ 		Py_DECREF(func);
+ 		Py_DECREF(args);
+ 		Py_XDECREF(keyw);
++		PyThreadState_Clear(boot->tstate);
+ 		PyMem_DEL(boot);
+ 		return NULL;
+ 	}
+diff -up Python-2.6.2/Python/pystate.c.low-memory-thread-creation Python-2.6.2/Python/pystate.c
+--- Python-2.6.2/Python/pystate.c.low-memory-thread-creation	2008-08-04 03:33:37.000000000 -0400
++++ Python-2.6.2/Python/pystate.c	2010-06-08 15:23:17.268481079 -0400
+@@ -154,8 +154,8 @@ threadstate_getframe(PyThreadState *self
+ 	return self->frame;
+ }
+ 
+-PyThreadState *
+-PyThreadState_New(PyInterpreterState *interp)
++static PyThreadState *
++new_threadstate(PyInterpreterState *interp, int init)
+ {
+ 	PyThreadState *tstate = (PyThreadState *)malloc(sizeof(PyThreadState));
+ 
+@@ -193,9 +193,8 @@ PyThreadState_New(PyInterpreterState *in
+ 		tstate->c_profileobj = NULL;
+ 		tstate->c_traceobj = NULL;
+ 
+-#ifdef WITH_THREAD
+-		_PyGILState_NoteThreadState(tstate);
+-#endif
++		if (init)
++			_PyThreadState_Init(tstate);
+ 
+ 		HEAD_LOCK();
+ 		tstate->next = interp->tstate_head;
+@@ -206,6 +205,25 @@ PyThreadState_New(PyInterpreterState *in
+ 	return tstate;
+ }
+ 
++PyThreadState *
++PyThreadState_New(PyInterpreterState *interp)
++{
++	return new_threadstate(interp, 1);
++}
++
++PyThreadState *
++_PyThreadState_Prealloc(PyInterpreterState *interp)
++{
++	return new_threadstate(interp, 0);
++}
++
++void
++_PyThreadState_Init(PyThreadState *tstate)
++{
++#ifdef WITH_THREAD
++	_PyGILState_NoteThreadState(tstate);
++#endif
++}
+ 
+ void
+ PyThreadState_Clear(PyThreadState *tstate)
